@@ -27,13 +27,27 @@ function sleep(ms) {
 }
 
 async function setupFastPage(page) {
+    const fastSetupTimeoutMs = Number.parseInt(
+        (process.env.FAST_PAGE_SETUP_TIMEOUT_MS || "8000").toString(),
+        10,
+    );
+
     try {
-        await page.setCacheEnabled(true);
+        await withTimeout(
+            page.setCacheEnabled(true),
+            fastSetupTimeoutMs,
+            "setCacheEnabled",
+        );
     } catch {}
 
     // Abort heavy resources (images/fonts/styles) to speed up.
     try {
-        await page.setRequestInterception(true);
+        // setRequestInterception can occasionally hang on some Chromium builds.
+        await withTimeout(
+            page.setRequestInterception(true),
+            fastSetupTimeoutMs,
+            "setRequestInterception",
+        );
         page.on("request", (req) => {
             try {
                 const rt = req.resourceType();
@@ -1271,7 +1285,7 @@ async function runScraper() {
         1,
         Math.min(
             6,
-            Number.parseInt((process.env.CONCURRENCY || "3").toString(), 10) ||
+            Number.parseInt((process.env.CONCURRENCY || "1").toString(), 10) ||
                 3,
         ),
     );
@@ -1301,6 +1315,20 @@ async function runScraper() {
     const LOG_STAGES = /^1|true$/i.test(
         (process.env.LOG_STAGES || "").toString(),
     );
+
+    const BROWSER_START_TIMEOUT_MS =
+        Number.parseInt(
+            (process.env.BROWSER_START_TIMEOUT_MS || "90000").toString(),
+            10,
+        ) || 90000;
+
+    const BROWSER_NEW_PAGE_TIMEOUT_MS =
+        Number.parseInt(
+            (process.env.BROWSER_NEW_PAGE_TIMEOUT_MS || "30000").toString(),
+            10,
+        ) || 30000;
+
+    const DUMPIO = /^1|true$/i.test((process.env.DUMPIO || "").toString());
 
     // Load input CSV (supports your column names)
     const targets = [];
@@ -1357,6 +1385,7 @@ async function runScraper() {
         defaultViewport: null,
         args: baseArgs,
         protocolTimeout: PROTOCOL_TIMEOUT_MS,
+        dumpio: DUMPIO,
         // If USER_DATA_DIR is not provided, use an isolated profile per run to
         // avoid profile corruption after forced termination.
         userDataDir:
@@ -1371,41 +1400,93 @@ async function runScraper() {
         return puppeteer.launch({ ...launchOptsBase, ...(extra || {}) });
     };
 
-    let browser = null;
-    try {
-        browser = await tryLaunch();
-    } catch (e1) {
-        // Fallback: use system-installed Chrome if available.
-        // You can force this with PUPPETEER_CHANNEL=chrome.
-        const forcedChannel = (process.env.PUPPETEER_CHANNEL || "")
-            .toString()
-            .trim();
-        if (forcedChannel || /3221225477/.test((e1 && e1.message) || "")) {
+    const closeBrowserHard = async (br) => {
+        if (!br) return;
+        try {
+            await br.close();
+        } catch {}
+        try {
+            const p = typeof br.process === "function" ? br.process() : null;
+            if (p && typeof p.kill === "function") p.kill();
+        } catch {}
+    };
+
+    const launchBrowserAndPage = async () => {
+        const launchPromise = (async () => {
             try {
-                const channel = forcedChannel || "chrome";
-                browser = await tryLaunch({ channel });
-            } catch {
+                return await tryLaunch();
+            } catch (e1) {
+                // Fallback: use system-installed Chrome if available.
+                // You can force this with PUPPETEER_CHANNEL=chrome.
+                const forcedChannel = (process.env.PUPPETEER_CHANNEL || "")
+                    .toString()
+                    .trim();
+                if (
+                    forcedChannel ||
+                    /3221225477/.test((e1 && e1.message) || "")
+                ) {
+                    const channel = forcedChannel || "chrome";
+                    return await tryLaunch({ channel });
+                }
                 throw e1;
             }
-        } else {
-            throw e1;
-        }
-    }
+        })();
 
-    _activeBrowser = browser;
+        let browser = null;
+        try {
+            browser = await withTimeout(
+                launchPromise,
+                BROWSER_START_TIMEOUT_MS,
+                "puppeteer.launch",
+            );
+        } catch (err) {
+            // If launch eventually succeeds after our timeout, make sure we close it.
+            launchPromise.then((br) => closeBrowserHard(br)).catch(() => {});
+            throw err;
+        }
+
+        _activeBrowser = browser;
+
+        const pagePromise = browser.newPage();
+        let page = null;
+        try {
+            page = await withTimeout(
+                pagePromise,
+                BROWSER_NEW_PAGE_TIMEOUT_MS,
+                "browser.newPage",
+            );
+        } catch (err) {
+            pagePromise.then(() => {}).catch(() => {});
+            await closeBrowserHard(browser);
+            _activeBrowser = null;
+            throw err;
+        }
+
+        // Set sensible per-page timeouts so slow targets don't hang forever.
+        try {
+            page.setDefaultTimeout(ORG_TIMEOUT_MS || 0);
+            page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS || 30000);
+        } catch {}
+
+        try {
+            await withTimeout(setupFastPage(page), 15000, "setupFastPage");
+        } catch {
+            // If request interception setup is flaky, continue without it.
+        }
+
+        return { browser, page };
+    };
+
+    let browser = null;
+    let page = null;
+    ({ browser, page } = await launchBrowserAndPage());
 
     // Run single-threaded to avoid concurrency issues
     console.log(
         `Settings: HEADLESS=${HEADLESS ? 1 : 0} RUN_MODE=single CONCURRENCY=${CONCURRENCY} DELAY_MS=${DELAY_MS} RESCAN_LENDER=${RESCAN_LENDER ? 1 : 0} ORG_TIMEOUT_MS=${ORG_TIMEOUT_MS}`,
     );
 
-    let page = await browser.newPage();
-    // Set sensible per-page timeouts so slow targets don't hang forever.
-    try {
-        page.setDefaultTimeout(ORG_TIMEOUT_MS || 0);
-        page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS || 30000);
-    } catch {}
-    await setupFastPage(page);
+    // page is created in launchBrowserAndPage()
 
     let processed = 0;
     let logIdx = 0;
@@ -1649,6 +1730,7 @@ async function runScraper() {
 
         let attemptTarget = 0;
         let ok = false;
+        let wasSkipped = false;
         while (attemptTarget < MAX_ORG_RETRIES && !ok) {
             attemptTarget++;
             try {
@@ -1659,6 +1741,7 @@ async function runScraper() {
                 );
                 if (res && res.skipped) {
                     ok = true;
+                    wasSkipped = true;
                     break;
                 }
                 ok = true;
@@ -1678,21 +1761,7 @@ async function runScraper() {
                 _activeBrowser = null;
 
                 try {
-                    browser = await puppeteer.launch({
-                        headless: HEADLESS,
-                        defaultViewport: null,
-                        args: ["--start-maximized"],
-                        protocolTimeout: PROTOCOL_TIMEOUT_MS,
-                    });
-                    _activeBrowser = browser;
-                    page = await browser.newPage();
-                    try {
-                        page.setDefaultTimeout(ORG_TIMEOUT_MS || 0);
-                        page.setDefaultNavigationTimeout(
-                            NAV_TIMEOUT_MS || 30000,
-                        );
-                    } catch {}
-                    await setupFastPage(page);
+                    ({ browser, page } = await launchBrowserAndPage());
                 } catch (e2) {
                     console.log(
                         `[single]   -> Failed to restart browser: ${e2 && e2.message ? e2.message : e2}`,
@@ -1711,6 +1780,13 @@ async function runScraper() {
             }
         }
         if (!ok) continue;
+
+        // IMPORTANT: when we skip an already-scraped org we should not apply
+        // per-org delay. Otherwise startup can look "stuck" for minutes while
+        // silently skipping a block of pre-scraped orgs.
+        if (wasSkipped) {
+            continue;
+        }
 
         processed++;
         if (LIMIT && processed >= LIMIT) {
