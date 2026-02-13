@@ -169,104 +169,152 @@ function loadAlreadyScrapedSet() {
     return set;
 }
 
-async function tryAcceptCookies(page) {
-    // Common Hitta cookie button is #modalConfirmBtn (you used it earlier)
-    try {
-        const btn = await page.$("#modalConfirmBtn");
-        if (btn) {
-            await btn.click();
-            await sleep(600);
-        }
-    } catch {}
+async function tryAcceptCookies(page, opts) {
+    const options = opts || {};
+    const maxWaitMs = Number(
+        options.maxWaitMs ||
+            Number.parseInt(
+                (process.env.COOKIE_WAIT_MS || "1200").toString(),
+                10,
+            ) ||
+            1200,
+    );
+    const pollMs = Number(
+        options.pollMs ||
+            Number.parseInt(
+                (process.env.COOKIE_POLL_MS || "200").toString(),
+                10,
+            ) ||
+            200,
+    );
+    const postClickDelayMs = Number(
+        options.postClickDelayMs ||
+            Number.parseInt(
+                (process.env.COOKIE_POST_CLICK_DELAY_MS || "300").toString(),
+                10,
+            ) ||
+            300,
+    );
 
-    // Some sessions use OneTrust
-    try {
-        const btn = await page.$("#onetrust-accept-btn-handler");
-        if (btn) {
-            await btn.click();
-            await sleep(600);
-        }
-    } catch {}
+    const start = Date.now();
+    while (true) {
+        let clickedAny = false;
 
-    // Fallback: click any visible button that looks like accept/approve
-    try {
-        // Specific Gravito/gravitoTCFCPM modal buttons seen on Hitta
-        const gravitoSelectors = [
-            "#gravitoTCFCPM-layer1-accept-all",
-            "#gravitoTCFCPM-layer1-accept",
-            "#gravitoCMP-accept-all",
-            '[id^="gravito"][id$="accept-all"]',
-            '[data-test="accept-all"]',
-        ];
-
-        let clicked = false;
-        for (const sel of gravitoSelectors) {
-            try {
-                const b = await page.$(sel);
-                if (b) {
-                    try {
-                        await b.evaluate((el) =>
-                            el.scrollIntoView({ block: "center" }),
-                        );
-                    } catch {}
-                    await b.click();
-                    await sleep(500);
-                    clicked = true;
-                    break;
-                }
-            } catch {}
-        }
-
-        // If not found, try generic text-based accept (handles different CMPs/languages)
-        if (!clicked) {
-            await page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll("button"));
-                const matcher =
-                    /(accept all|accept|agree|godkän(n)? alla|godkänn|tillåt|ok)/i;
-                const btn = buttons.find((b) =>
-                    matcher.test((b.innerText || "").trim()),
-                );
-                if (btn) btn.click();
-            });
-            await sleep(400);
-        }
-
-        // If Gravito lives inside a modal container, try to click internal buttons by querying the container
+        // Common Hitta cookie button is #modalConfirmBtn (you used it earlier)
         try {
-            const root = await page.$("#gravitoCMPRoot");
-            if (root) {
-                await page.evaluate(() => {
-                    const rootEl = document.querySelector("#gravitoCMPRoot");
-                    if (!rootEl) return;
-                    const btn =
-                        rootEl.querySelector('button[id*="accept"]') ||
-                        rootEl.querySelector('button[aria-label*="accept"]');
-                    if (btn) btn.click();
-                });
-                await sleep(300);
+            const btn = await page.$("#modalConfirmBtn");
+            if (btn) {
+                await btn.click();
+                clickedAny = true;
+                await sleep(postClickDelayMs);
             }
         } catch {}
 
-        // As a last resort, try frames (some CMPs render into an iframe)
+        // Some sessions use OneTrust
         try {
-            for (const f of page.frames()) {
+            const btn = await page.$("#onetrust-accept-btn-handler");
+            if (btn) {
+                await btn.click();
+                clickedAny = true;
+                await sleep(postClickDelayMs);
+            }
+        } catch {}
+
+        // Fallback: click any visible button that looks like accept/approve
+        try {
+            // Specific Gravito/gravitoTCFCPM modal buttons seen on Hitta
+            const gravitoSelectors = [
+                "#gravitoTCFCPM-layer1-accept-all",
+                "#gravitoTCFCPM-layer1-accept",
+                "#gravitoCMP-accept-all",
+                '[id^="gravito"][id$="accept-all"]',
+                '[data-test="accept-all"]',
+            ];
+
+            let clicked = false;
+            for (const sel of gravitoSelectors) {
                 try {
-                    const btn = await f.$(
-                        'button[id*="gravito"], button[id*="accept"], button[title*="accept"], button[aria-label*="accept"]',
-                    );
-                    if (btn) {
+                    const b = await page.$(sel);
+                    if (b) {
                         try {
-                            await btn.click();
-                        } catch {
-                            await f.evaluate((b) => b.click(), btn);
-                        }
-                        await sleep(300);
+                            await b.evaluate((el) =>
+                                el.scrollIntoView({ block: "center" }),
+                            );
+                        } catch {}
+                        await b.click();
+                        clickedAny = true;
+                        await sleep(postClickDelayMs);
+                        clicked = true;
                         break;
                     }
                 } catch {}
             }
+
+            // If not found, try generic text-based accept (handles different CMPs/languages)
+            if (!clicked) {
+                await page.evaluate(() => {
+                    const buttons = Array.from(
+                        document.querySelectorAll("button"),
+                    );
+                    const matcher =
+                        /(accept all|accept|agree|godkän(n)? alla|godkänn|tillåt|ok)/i;
+                    const btn = buttons.find((b) =>
+                        matcher.test((b.innerText || "").trim()),
+                    );
+                    if (btn) btn.click();
+                });
+                await sleep(Math.min(250, postClickDelayMs));
+            }
+
+            // If Gravito lives inside a modal container, try to click internal buttons by querying the container
+            try {
+                const root = await page.$("#gravitoCMPRoot");
+                if (root) {
+                    await page.evaluate(() => {
+                        const rootEl =
+                            document.querySelector("#gravitoCMPRoot");
+                        if (!rootEl) return;
+                        const btn =
+                            rootEl.querySelector('button[id*="accept"]') ||
+                            rootEl.querySelector(
+                                'button[aria-label*="accept"]',
+                            );
+                        if (btn) btn.click();
+                    });
+                    clickedAny = true;
+                    await sleep(Math.min(250, postClickDelayMs));
+                }
+            } catch {}
+
+            // As a last resort, try frames (some CMPs render into an iframe)
+            try {
+                for (const f of page.frames()) {
+                    try {
+                        const btn = await f.$(
+                            'button[id*="gravito"], button[id*="accept"], button[title*="accept"], button[aria-label*="accept"]',
+                        );
+                        if (btn) {
+                            try {
+                                await btn.click();
+                            } catch {
+                                await f.evaluate((b) => b.click(), btn);
+                            }
+                            clickedAny = true;
+                            await sleep(Math.min(250, postClickDelayMs));
+                            break;
+                        }
+                    } catch {}
+                }
+            } catch {}
         } catch {}
-    } catch {}
+
+        // If we clicked anything, assume CMP is handled.
+        if (clickedAny) return true;
+
+        const elapsed = Date.now() - start;
+        if (elapsed >= maxWaitMs) return false;
+        await sleep(pollMs);
+    }
 }
 
 async function waitForFinanceTables(page) {
@@ -352,7 +400,7 @@ async function scrapeContactDetails(page) {
                 await safeClick(page, '[data-test="tab-company-contact"]', {
                     retries: 3,
                     waitTimeout: 1500,
-                    postDelay: 600,
+                    postDelay: 200,
                 });
             } catch {}
         }
@@ -363,7 +411,7 @@ async function scrapeContactDetails(page) {
         await safeClick(page, '[data-test="company-email-button"]', {
             retries: 3,
             waitTimeout: 1200,
-            postDelay: 500,
+            postDelay: 200,
         });
     } catch {}
 
@@ -386,7 +434,7 @@ async function scrapeContactDetails(page) {
         await safeClick(page, '[data-test="show-numbers-button"]', {
             retries: 2,
             waitTimeout: 1000,
-            postDelay: 500,
+            postDelay: 200,
         });
     } catch {}
 
@@ -1027,6 +1075,58 @@ async function scrapeLenderKeywordsPdfFirst(browser, page) {
     const USE_XY_COORDS = /^1|true$/i.test(
         (process.env.USE_XY_COORDS || "").toString(),
     );
+
+    // Performance / stability tuning (env-overridable)
+    const PDF_URL_SCAN_LIMIT = Math.max(
+        1,
+        Math.min(
+            8,
+            Number.parseInt(
+                (process.env.PDF_URL_SCAN_LIMIT || "3").toString(),
+                10,
+            ) || 3,
+        ),
+    );
+
+    const PDF_PAGE_CREATE_TIMEOUT_MS =
+        Number.parseInt(
+            (process.env.PDF_PAGE_CREATE_TIMEOUT_MS || "20000").toString(),
+            10,
+        ) || 20000;
+
+    const PDF_BUFFER_TIMEOUT_MS =
+        Number.parseInt(
+            (process.env.PDF_BUFFER_TIMEOUT_MS || "30000").toString(),
+            10,
+        ) || 30000;
+
+    const PDF_PARSE_TIMEOUT_MS =
+        Number.parseInt(
+            (process.env.PDF_PARSE_TIMEOUT_MS || "25000").toString(),
+            10,
+        ) || 25000;
+
+    const XY_TIMEOUT_MS =
+        Number.parseInt(
+            (process.env.XY_TIMEOUT_MS || "25000").toString(),
+            10,
+        ) || 25000;
+
+    const XY_MAX_PAGES =
+        Number.parseInt((process.env.XY_MAX_PAGES || "12").toString(), 10) ||
+        12;
+
+    const MAX_PDF_BYTES =
+        Number.parseInt(
+            (process.env.MAX_PDF_BYTES || "25000000").toString(),
+            10,
+        ) || 25000000;
+
+    const pdfNavTimeout =
+        Number.parseInt(
+            (process.env.NAV_TIMEOUT_MS || "30000").toString(),
+            10,
+        ) || 30000;
     if (!matchers.length) {
         return {
             keywords: [],
@@ -1110,28 +1210,55 @@ async function scrapeLenderKeywordsPdfFirst(browser, page) {
         pdfUrls = [];
     }
 
+    if (Array.isArray(pdfUrls) && pdfUrls.length > PDF_URL_SCAN_LIMIT) {
+        pdfUrls = pdfUrls.slice(0, PDF_URL_SCAN_LIMIT);
+    }
+
     let pdfPage = null;
     try {
         if (pdfUrls.length) {
-            pdfPage = await browser.newPage();
-            await setupFastPage(pdfPage);
+            pdfPage = await withTimeout(
+                browser.newPage(),
+                PDF_PAGE_CREATE_TIMEOUT_MS,
+                "browser.newPage (pdf)",
+            );
+            try {
+                await withTimeout(
+                    setupFastPage(pdfPage),
+                    15000,
+                    "setupFastPage (pdf)",
+                );
+            } catch {}
         }
 
         for (const url of pdfUrls) {
-            const resp = await pdfPage.goto(url, {
-                waitUntil: "domcontentloaded",
-                timeout:
-                    Number.parseInt(
-                        (process.env.NAV_TIMEOUT_MS || "30000").toString(),
-                        10,
-                    ) || 30000,
-            });
+            const resp = await withTimeout(
+                pdfPage.goto(url, {
+                    waitUntil: "domcontentloaded",
+                    timeout: pdfNavTimeout,
+                }),
+                pdfNavTimeout + 5000,
+                `pdf goto ${url}`,
+            );
 
             if (!resp || !resp.ok()) {
                 continue;
             }
 
-            const buf = await resp.buffer();
+            const buf = await withTimeout(
+                resp.buffer(),
+                PDF_BUFFER_TIMEOUT_MS,
+                "resp.buffer (pdf)",
+            );
+
+            if (!buf || !buf.length) {
+                continue;
+            }
+
+            // Extremely large PDFs can stall parsing for a long time.
+            if (buf.length > MAX_PDF_BYTES) {
+                continue;
+            }
 
             // Some links are to HTML viewers/download endpoints. Confirm PDF bytes.
             const head = buf.slice(0, 8).toString("latin1");
@@ -1139,7 +1266,11 @@ async function scrapeLenderKeywordsPdfFirst(browser, page) {
                 continue;
             }
 
-            const parsed = await pdfParse(buf);
+            const parsed = await withTimeout(
+                pdfParse(buf),
+                PDF_PARSE_TIMEOUT_MS,
+                "pdfParse",
+            );
             const text = parsed && parsed.text ? parsed.text : "";
             const hits = await scanKeywordsInText(text, matchers);
             let keywordLines = extractMatchedLines(text, matchers, {
@@ -1148,19 +1279,19 @@ async function scrapeLenderKeywordsPdfFirst(browser, page) {
             });
             let source = "PDF";
 
-            if (USE_XY_COORDS) {
+            // XY extraction is expensive; only do it if we already saw hits.
+            if (USE_XY_COORDS && (hits.size > 0 || keywordLines.length > 0)) {
                 try {
-                    const keywordLinesXY =
-                        await extractMatchedLinesFromPdfBufferXY(
-                            buf,
-                            matchers,
-                            {
-                                maxLinesPerKey: 10,
-                                maxTotalLines: 60,
-                                preferredCount: 2,
-                                maxPages: 12,
-                            },
-                        );
+                    const keywordLinesXY = await withTimeout(
+                        extractMatchedLinesFromPdfBufferXY(buf, matchers, {
+                            maxLinesPerKey: 10,
+                            maxTotalLines: 60,
+                            preferredCount: 2,
+                            maxPages: XY_MAX_PAGES,
+                        }),
+                        XY_TIMEOUT_MS,
+                        "extractMatchedLinesFromPdfBufferXY",
+                    );
 
                     if (keywordLinesXY.length) {
                         keywordLines = blendXyAndTextLines(
@@ -1195,47 +1326,55 @@ async function scrapeLenderKeywordsPdfFirst(browser, page) {
         const { tried, buf } = await tryDownloadAnnualReportPdfViaButtons(page);
         buttonTried = Boolean(tried);
         if (buf) {
-            const parsed = await pdfParse(buf);
-            const text = parsed && parsed.text ? parsed.text : "";
-            const hits = await scanKeywordsInText(text, matchers);
-            let keywordLines = extractMatchedLines(text, matchers, {
-                maxLinesPerKey: 10,
-                maxTotalLines: 60,
-            });
-            let source = "PDF";
+            if (buf.length <= MAX_PDF_BYTES) {
+                const parsed = await withTimeout(
+                    pdfParse(buf),
+                    PDF_PARSE_TIMEOUT_MS,
+                    "pdfParse (button)",
+                );
+                const text = parsed && parsed.text ? parsed.text : "";
+                const hits = await scanKeywordsInText(text, matchers);
+                let keywordLines = extractMatchedLines(text, matchers, {
+                    maxLinesPerKey: 10,
+                    maxTotalLines: 60,
+                });
+                let source = "PDF";
 
-            if (USE_XY_COORDS) {
-                try {
-                    const keywordLinesXY =
-                        await extractMatchedLinesFromPdfBufferXY(
-                            buf,
-                            matchers,
-                            {
+                if (
+                    USE_XY_COORDS &&
+                    (hits.size > 0 || keywordLines.length > 0)
+                ) {
+                    try {
+                        const keywordLinesXY = await withTimeout(
+                            extractMatchedLinesFromPdfBufferXY(buf, matchers, {
                                 maxLinesPerKey: 10,
                                 maxTotalLines: 60,
                                 preferredCount: 2,
-                                maxPages: 12,
-                            },
+                                maxPages: XY_MAX_PAGES,
+                            }),
+                            XY_TIMEOUT_MS,
+                            "extractMatchedLinesFromPdfBufferXY (button)",
                         );
 
-                    if (keywordLinesXY.length) {
-                        keywordLines = blendXyAndTextLines(
-                            keywordLinesXY,
-                            keywordLines,
-                        );
-                    }
-                    if (keywordLinesXY.length) {
-                        source = "PDF_XY";
-                    }
-                } catch {}
+                        if (keywordLinesXY.length) {
+                            keywordLines = blendXyAndTextLines(
+                                keywordLinesXY,
+                                keywordLines,
+                            );
+                        }
+                        if (keywordLinesXY.length) {
+                            source = "PDF_XY";
+                        }
+                    } catch {}
+                }
+
+                return {
+                    keywords: Array.from(hits),
+                    keywordLines,
+                    source,
+                    pdfUrl: null,
+                };
             }
-
-            return {
-                keywords: Array.from(hits),
-                keywordLines,
-                source,
-                pdfUrl: null,
-            };
         }
     } catch {
         // ignore
@@ -1266,6 +1405,9 @@ async function scrapeLenderKeywordsPdfFirst(browser, page) {
 }
 
 async function runScraper() {
+    // IMPORTANT: cli-scrape can restart the scraper within the same Node
+    // process after crashes. Make sure we don't carry over an abort request.
+    _abortRequested = false;
     fs.ensureFileSync(config.paths.financeJsonl);
 
     const RESCAN_LENDER = /^1|true$/i.test(process.env.RESCAN_LENDER || "");
@@ -1290,7 +1432,7 @@ async function runScraper() {
         ),
     );
     const DELAY_MS =
-        Number.parseInt((process.env.DELAY_MS || "500").toString(), 10) || 0;
+        Number.parseInt((process.env.DELAY_MS || "0").toString(), 10) || 0;
 
     const ORG_TIMEOUT_MS =
         Number.parseInt(
@@ -1314,6 +1456,9 @@ async function runScraper() {
         ) || 30000;
     const LOG_STAGES = /^1|true$/i.test(
         (process.env.LOG_STAGES || "").toString(),
+    );
+    const LOG_TIMINGS = /^1|true$/i.test(
+        (process.env.LOG_TIMINGS || "").toString(),
     );
 
     const BROWSER_START_TIMEOUT_MS =
@@ -1481,6 +1626,20 @@ async function runScraper() {
     let page = null;
     ({ browser, page } = await launchBrowserAndPage());
 
+    const ensureBrowserAndPage = async () => {
+        const browserOk =
+            browser && typeof browser.isConnected === "function"
+                ? browser.isConnected()
+                : Boolean(browser);
+        const pageOk =
+            page && typeof page.isClosed === "function"
+                ? !page.isClosed()
+                : Boolean(page);
+        if (!browserOk || !pageOk) {
+            ({ browser, page } = await launchBrowserAndPage());
+        }
+    };
+
     // Run single-threaded to avoid concurrency issues
     console.log(
         `Settings: HEADLESS=${HEADLESS ? 1 : 0} RUN_MODE=single CONCURRENCY=${CONCURRENCY} DELAY_MS=${DELAY_MS} RESCAN_LENDER=${RESCAN_LENDER ? 1 : 0} ORG_TIMEOUT_MS=${ORG_TIMEOUT_MS}`,
@@ -1502,12 +1661,20 @@ async function runScraper() {
             `${prefix} Scraping ${org} ${name}${rescanOnly ? " (rescan lender)" : ""}`,
         );
 
+        const t0 = Date.now();
+        let tBaseMs = 0;
+        let tReportsMs = 0;
+        let tPdfMs = 0;
+
         let contact = null;
         let lender = { keywords: [], source: "NONE", pdfUrl: null };
+        let completed = false;
+        let lastErr = null;
 
         for (let attempt = 1; attempt <= 2; attempt++) {
             try {
                 if (LOG_STAGES) console.log(`${prefix}   -> base page`);
+                const tb0 = Date.now();
                 await page.goto(
                     `https://www.hitta.se/företagsinformation/${org}`,
                     {
@@ -1515,11 +1682,12 @@ async function runScraper() {
                         timeout: NAV_TIMEOUT_MS,
                     },
                 );
-                await sleep(600);
                 await tryAcceptCookies(page);
                 contact = await scrapeContactDetails(page);
+                tBaseMs += Date.now() - tb0;
 
                 if (LOG_STAGES) console.log(`${prefix}   -> reports page`);
+                const tr0 = Date.now();
                 await page.goto(
                     `https://www.hitta.se/företagsinformation/${org}#reports`,
                     {
@@ -1527,17 +1695,31 @@ async function runScraper() {
                         timeout: NAV_TIMEOUT_MS,
                     },
                 );
-                await sleep(500);
                 await tryAcceptCookies(page);
+                tReportsMs += Date.now() - tr0;
 
                 if (LOG_STAGES) console.log(`${prefix}   -> pdf scan`);
+                const tp0 = Date.now();
                 lender = await scrapeLenderKeywordsPdfFirst(browser, page);
+                tPdfMs += Date.now() - tp0;
+
+                completed = true;
 
                 break;
             } catch (err) {
-                console.log(`  -> Attempt ${attempt} failed: ${err.message}`);
-                await sleep(900);
+                lastErr = err;
+                console.log(
+                    `  -> Attempt ${attempt} failed: ${err && err.message ? err.message : err}`,
+                );
+                await sleep(200);
             }
+        }
+
+        if (LOG_TIMINGS) {
+            const totalMs = Date.now() - t0;
+            console.log(
+                `${prefix}   -> Timings: base=${tBaseMs}ms reports=${tReportsMs}ms pdf=${tPdfMs}ms total=${totalMs}ms`,
+            );
         }
 
         // Post-process matched lines: keep only relevant loan/financing lines and
@@ -1693,6 +1875,11 @@ async function runScraper() {
             (Array.isArray(lenderKeywordLines) && lenderKeywordLines.length);
 
         if (!hasAnyData && (lender?.source || "NONE") === "NONE") {
+            // If we never completed a successful pass, treat as failure so the
+            // outer ORG_RETRIES loop can restart browser/page and retry.
+            if (!completed) {
+                throw lastErr || new Error("Scan failed: no data collected");
+            }
             console.log(`${prefix}   -> No data (scan failed) — not saved`);
             return { skipped: false };
         }
@@ -1734,6 +1921,7 @@ async function runScraper() {
         while (attemptTarget < MAX_ORG_RETRIES && !ok) {
             attemptTarget++;
             try {
+                await ensureBrowserAndPage();
                 const res = await withTimeout(
                     scrapeOne(page, org, name, 1),
                     ORG_TIMEOUT_MS,
@@ -1766,6 +1954,8 @@ async function runScraper() {
                     console.log(
                         `[single]   -> Failed to restart browser: ${e2 && e2.message ? e2.message : e2}`,
                     );
+                    browser = null;
+                    page = null;
                 }
 
                 if (attemptTarget >= MAX_ORG_RETRIES) {

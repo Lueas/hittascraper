@@ -64,8 +64,15 @@ process.on("uncaughtException", (err) => {
 
         try {
             await scraper();
-            process.exitCode = 0;
-            return;
+            if (!restartRequested) {
+                process.exitCode = 0;
+                return;
+            }
+            // An unhandled error triggered a restart request, and the scraper
+            // likely exited early due to abort. Restart instead of exiting.
+            console.error(
+                "Run ended after a restart request; restarting scraper...",
+            );
         } catch (err) {
             console.error("Scraper crashed:", err);
             await requestRestart(err);
